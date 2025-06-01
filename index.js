@@ -8,19 +8,19 @@
 
 import { stripeBalanceMiddleware, DORM } from "stripeflare";
 
-//@ts-expect-error
+//@ts-ignore
 import handler from "../../main";
 //@ts-expect-error
 import resultHtml from "../../result.html";
 //@ts-expect-error
-import packageJson from "../../package.json";
+import homepageHtml from "../../homepage.html";
 
 export { DORM };
 
 // Default configuration with overrides from main handler
 const config = {
   version: 1,
-  priceCredit: 1, // Price in cents
+  priceCredit: 1,
   freeRateLimit: 10,
   freeRateLimitResetSeconds: 3600,
   // overwrite defaults if present
@@ -219,6 +219,7 @@ function createPaymentRequiredResponse(
 }
 
 export default {
+  ...handler,
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
@@ -274,8 +275,10 @@ export default {
         if (pathname === "/") {
           const content =
             ext === "html"
-              ? markdownToHtml(JSON.stringify(packageJson, undefined, 2))
-              : JSON.stringify(packageJson);
+              ? homepageHtml
+              : await env.ASSETS.fetch(url.origin + "/README.md").then((res) =>
+                  res.text(),
+                );
           return addCorsHeaders(
             new Response(content, {
               headers: {

@@ -1,0 +1,3 @@
+- We want to be able to retrieve additional configuration for paying users and put that into a single storage easily. Ensure to pass `X-User-ID` alongside the original request.
+- Allow `X-Price` header response for dynamic pricing overwrite.
+- Allow refreshing cache in `waitUntil` if cache was hit, using `refresh` handler. however, be sure that this only happens if a user can be charged.
