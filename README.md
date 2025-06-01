@@ -15,6 +15,8 @@ It has strong and powerful opinions built-in:
 - **KV-first**: if kv is present, always use it. If not, the handler is hit. KV should contain the final HTML and final Markdown rather than structured data. This ensures results are always extremely fast by design.
 - **Agent-Friendly Landingpage**: if you hit the worker through curl or fetch without additional headers, you get the `README.md` rather than the `homepage.html`.
 
+One learning that can be taken from this package is the 'package-as-entrypoint' pattern; the package becomes the entrypoint while using files from the worker itself, and this works fine!
+
 See: https://lmpify.com/consider-the-example-gtsehr0
 
 How to use:

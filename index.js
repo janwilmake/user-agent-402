@@ -17,14 +17,35 @@ import homepageHtml from "../../homepage.html";
 
 export { DORM };
 
+/**
+ * @typedef {Object} Env
+ * @property {KVNamespace} PATH_CACHE - The user's name
+ * @property {Fetcher} ASSETS - The user's age
+ * @property {DurableObjectNamespace} RATE_LIMITER - The user's email address
+ * @property {string} STRIPE_PAYMENT_LINK - payment link
+ */
+
+/**
+ * @typedef {Object} StripeUser
+ */
+
+/**
+ * @typedef {{timestamp:number}} CacheMetadata
+ */
+
 // Default configuration with overrides from main handler
+
+/** @type {{}} */
+const typedHandler = handler;
+
 const config = {
   version: 1,
   priceCredit: 1,
   freeRateLimit: 10,
   freeRateLimitResetSeconds: 3600,
+  expirationTtl: 0,
   // overwrite defaults if present
-  ...handler,
+  ...typedHandler,
 };
 
 // Database migrations for Stripeflare
@@ -220,8 +241,15 @@ function createPaymentRequiredResponse(
 
 export default {
   ...handler,
+  /**
+   * @param {Request} request
+   * @param {Env} env
+   * @param {ExecutionContext&{user:StripeUser|null, metadata:CacheMetadata}} ctx
+   * @returns {Promise<Response>}
+   */
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    let pathname = url.pathname;
 
     // Handle CORS preflight
     if (request.method === "OPTIONS") {
@@ -232,6 +260,7 @@ export default {
       // Handle Stripeflare middleware
       const stripeResult = await stripeBalanceMiddleware(
         request,
+        //@ts-ignore
         env,
         ctx,
         migrations,
@@ -243,7 +272,6 @@ export default {
       }
 
       // Determine response format
-      let pathname = url.pathname;
       const ext = getResponseFormat(request, pathname);
 
       // Remove extension from pathname if present
@@ -255,11 +283,41 @@ export default {
       if (request.method === "GET") {
         // Check cache first
         const cacheKey = createCacheKey(pathname, url.searchParams, ext);
-        const cached = await env.SEARCH_CACHE?.get(cacheKey);
+        const cached = await env.PATH_CACHE.getWithMetadata(cacheKey);
+        if (cached.value) {
+          if (
+            stripeResult.session?.userClient &&
+            stripeResult.session.user?.balance &&
+            stripeResult.session.user.balance > 0
+          ) {
+            // Allow refreshing cache in `waitUntil` if cache was hit, using `refresh` handler.
+            // However, be sure that this only happens if a user can be charged.
+            if (
+              handler.shouldRefresh &&
+              typeof handler.shouldRefresh === "function"
+            ) {
+              //@ts-ignore
+              ctx.metadata = cached.metadata;
+              const shouldRefreshResponse = await handler.shouldRefresh(
+                request,
+                env,
+                ctx,
+              );
+              if (shouldRefreshResponse.ok) {
+                // Should refresh in waitUntil, charging the user that requested this item.
+                ctx.waitUntil(
+                  chargedRequest(request, env, ctx, {
+                    stripeResult,
+                    priceCredit: config.priceCredit,
+                    expirationTtl: config.expirationTtl,
+                  }),
+                );
+              }
+            }
+          }
 
-        if (cached) {
           return addCorsHeaders(
-            new Response(cached, {
+            new Response(cached.value, {
               headers: {
                 "Content-Type":
                   ext === "html"
@@ -350,50 +408,11 @@ export default {
         );
       }
 
-      // Execute main handler
-      const response = await handler.fetch(request, env, ctx);
-      const resultText = await response.text();
-
-      // Charge user if they have balance
-      if (user && stripeResult.session && response.status === 200) {
-        const { charged } = await stripeResult.session.charge(
-          config.priceCredit,
-          false,
-        );
-        console.log(
-          `Charged user ${user.access_token}: $${config.priceCredit / 100}`,
-        );
-      }
-
-      // Cache results if successful
-      if (response.status === 200 && env.PATH_CACHE) {
-        const cacheKeyMd = createCacheKey(pathname, url.searchParams, "md");
-        const cacheKeyHtml = createCacheKey(pathname, url.searchParams, "html");
-        const htmlContent = markdownToHtml(resultText);
-
-        ctx.waitUntil(
-          Promise.all([
-            env.PATH_CACHE.put(cacheKeyMd, resultText),
-            env.PATH_CACHE.put(cacheKeyHtml, htmlContent),
-          ]),
-        );
-      }
-
-      // Return appropriate format
-      const finalContent =
-        ext === "html" ? markdownToHtml(resultText) : resultText;
-      const finalResponse = new Response(finalContent, {
-        status: response.status,
-        headers: {
-          "Content-Type":
-            ext === "html"
-              ? "text/html; charset=utf-8"
-              : "text/markdown; charset=utf-8",
-          "X-Cache": "MISS",
-        },
+      return chargedRequest(request, env, ctx, {
+        stripeResult,
+        priceCredit: config.priceCredit,
+        expirationTtl: config.expirationTtl,
       });
-
-      return addCorsHeaders(finalResponse);
     } catch (error) {
       console.error("Worker error:", error);
       const errorResponse = new Response(`Error: ${error.message}`, {
@@ -402,4 +421,75 @@ export default {
       return addCorsHeaders(errorResponse);
     }
   },
+};
+
+/**
+ *
+ * @param {Request} request
+ * @param {Env} env
+ * @param {ExecutionContext&{user:StripeUser|null}} ctx
+ * @param {{stripeResult:any,priceCredit:number,expirationTtl:number|undefined}} config
+ * @returns
+ */
+const chargedRequest = async (request, env, ctx, config) => {
+  const { stripeResult } = config;
+  const url = new URL(request.url);
+  let pathname = url.pathname;
+  const ext = getResponseFormat(request, pathname);
+
+  // Add user to ctx
+  ctx.user = stripeResult.session.user;
+
+  const response = await handler.fetch(request, env, ctx);
+  const priceCreditHeader = response.headers.get("X-Price");
+  const priceCredit =
+    priceCreditHeader && !isNaN(Number(priceCreditHeader))
+      ? Number(priceCreditHeader)
+      : config.priceCredit;
+  const resultText = await response.text();
+
+  // Charge user if they have balance
+  if (ctx.user && stripeResult.session && response.status === 200) {
+    const { charged } = await stripeResult.session.charge(priceCredit, true);
+    console.log(
+      `Charged (${String(charged)}) user ${ctx.user.access_token}: $${
+        config.priceCredit / 100
+      }`,
+    );
+  }
+
+  // Cache results if successful
+  if (response.status === 200 && env.PATH_CACHE) {
+    const cacheKeyMd = createCacheKey(pathname, url.searchParams, "md");
+    const cacheKeyHtml = createCacheKey(pathname, url.searchParams, "html");
+    const htmlContent = markdownToHtml(resultText);
+
+    ctx.waitUntil(
+      Promise.all([
+        env.PATH_CACHE.put(cacheKeyMd, resultText, {
+          expirationTtl: config.expirationTtl,
+          metadata: { timestamp: Date.now() },
+        }),
+        env.PATH_CACHE.put(cacheKeyHtml, htmlContent, {
+          expirationTtl: config.expirationTtl,
+          metadata: { timestamp: Date.now() },
+        }),
+      ]),
+    );
+  }
+
+  // Return appropriate format
+  const finalContent = ext === "html" ? markdownToHtml(resultText) : resultText;
+  const finalResponse = new Response(finalContent, {
+    status: response.status,
+    headers: {
+      "Content-Type":
+        ext === "html"
+          ? "text/html; charset=utf-8"
+          : "text/markdown; charset=utf-8",
+      "X-Cache": "MISS",
+    },
+  });
+
+  return addCorsHeaders(finalResponse);
 };
