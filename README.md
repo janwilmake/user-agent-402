@@ -63,7 +63,6 @@ In your `main.js|ts` ensure your default export has the following variables set 
 ```ts
 // all values are optional!
 export default {
-  README: "Description of your worker.",
   // version for resolving values from kv
   version: 1,
   // cents to charge per 200 response for users that have paid
