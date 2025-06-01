@@ -43,7 +43,7 @@ const config = {
   priceCredit: 1,
   freeRateLimit: 10,
   freeRateLimitResetSeconds: 3600,
-  expirationTtl: 0,
+  expirationTtl: undefined,
   // overwrite defaults if present
   ...typedHandler,
 };
