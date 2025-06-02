@@ -12,8 +12,6 @@ import { stripeBalanceMiddleware, DORM } from "stripeflare";
 import handler from "../../main";
 //@ts-expect-error
 import resultHtml from "../../result.html";
-//@ts-expect-error
-import homepageHtml from "../../homepage.html";
 
 export { DORM };
 
@@ -77,21 +75,13 @@ export class RateLimiter {
     this.env = env;
   }
 
-  async fetch(request) {
-    const url = new URL(request.url);
-    const clientId = url.searchParams.get("clientId");
-
-    if (!clientId) {
-      return new Response("Missing clientId", { status: 400 });
-    }
-
+  async fetch() {
     const now = Date.now();
     const resetWindow = config.freeRateLimitResetSeconds * 1000;
     const windowStart = now - resetWindow;
 
     // Get current requests for this window
-    const requests =
-      (await this.state.storage.get(`requests:${clientId}`)) || [];
+    const requests = (await this.state.storage.get(`requests`)) || [];
 
     // Filter out requests older than the reset window
     const recentRequests = requests.filter(
@@ -114,7 +104,7 @@ export class RateLimiter {
 
     // Add current request
     recentRequests.push(now);
-    await this.state.storage.put(`requests:${clientId}`, recentRequests);
+    await this.state.storage.put(`requests`, recentRequests);
 
     return new Response(
       JSON.stringify({
@@ -122,9 +112,7 @@ export class RateLimiter {
         remaining: config.freeRateLimit - recentRequests.length,
         resetTime: now + resetWindow,
       }),
-      {
-        headers: { "Content-Type": "application/json" },
-      },
+      { headers: { "Content-Type": "application/json" } },
     );
   }
 }
@@ -270,7 +258,7 @@ export default {
         });
       }
 
-      const { user } = stripeResult.session;
+      const { user, userClient } = stripeResult.session;
       const { access_token, verified_user_access_token, ...publicUser } =
         user || {};
       const headers = new Headers(stripeResult.session.headers || {});
@@ -291,18 +279,6 @@ export default {
           ? "text/html; charset=utf-8"
           : "text/markdown; charset=utf-8",
       );
-
-      // Handle root path
-      if (pathname === "/") {
-        const content =
-          ext === "html"
-            ? homepageHtml
-            : await env.ASSETS.fetch(url.origin + "/README.md").then((res) =>
-                res.text(),
-              );
-
-        return new Response(content, { headers });
-      }
 
       // Remove extension from pathname if present
       if (pathname.endsWith(".html") || pathname.endsWith(".md")) {
@@ -355,21 +331,19 @@ export default {
 
       // Authentication and billing logic
       let clientId = stripeResult.session?.user?.client_reference_id;
-      let doName = request.headers.get("CF-Connecting-IP") || "anonymous";
-
       // Check rate limiting for users without balance
       if (!user || !user.balance || user.balance <= 0) {
+        let doName = request.headers.get("CF-Connecting-IP") || "anonymous";
+        console.log({ doName });
         const rateLimiterId = env.RATE_LIMITER.idFromName(doName);
         const rateLimiter = env.RATE_LIMITER.get(rateLimiterId);
 
         const rateLimitResponse = await rateLimiter.fetch(
-          new Request(
-            `https://rate-limiter/check?clientId=${encodeURIComponent(doName)}`,
-          ),
+          new Request(`https://rate-limiter/check`),
         );
 
         const rateLimitData = await rateLimitResponse.json();
-
+        console.log({ rateLimitData });
         if (!rateLimitData.allowed) {
           return createPaymentRequiredResponse(
             headers,
@@ -388,7 +362,11 @@ export default {
       }
 
       // Check user balance
-      if (user && user.balance < config.priceCredit) {
+      if (
+        stripeResult.session.userClient &&
+        user.balance !== undefined &&
+        user.balance < config.priceCredit
+      ) {
         return createPaymentRequiredResponse(
           headers,
           `Insufficient balance. Each request costs $${(
