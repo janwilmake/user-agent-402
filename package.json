@@ -1,9 +1,10 @@
 {
   "name": "user-agent-402",
-  "version": "0.0.15",
+  "version": "0.0.26",
   "main": "index.js",
+  "types": "types.d.ts",
   "dependencies": {
-    "stripeflare": "^0.0.16"
+    "stripeflare": "0.0.17"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241218.0"

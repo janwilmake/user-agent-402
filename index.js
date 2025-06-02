@@ -130,20 +130,6 @@ export class RateLimiter {
 }
 
 /**
- * Add CORS headers to any response
- */
-function addCorsHeaders(response) {
-  const newResponse = new Response(response.body, response);
-  newResponse.headers.set("Access-Control-Allow-Origin", "*");
-  newResponse.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  newResponse.headers.set(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization",
-  );
-  return newResponse;
-}
-
-/**
  * Determine response format from request
  */
 function getResponseFormat(request, pathname) {
@@ -174,19 +160,23 @@ function createCacheKey(pathname, searchParams, ext) {
 /**
  * Convert markdown to HTML using template
  */
-function markdownToHtml(markdown) {
-  return resultHtml.replace("{{result}}", markdown);
+function markdownToHtml(markdown, pathname) {
+  return resultHtml
+    .replace("{{result}}", markdown)
+    .replaceAll("{{pathname}}", pathname);
 }
 
 /**
  * Create payment required response
  */
 function createPaymentRequiredResponse(
+  headers,
   message,
   paymentLink,
   clientId,
   rateLimitData = null,
   ext = "md",
+  pathname,
 ) {
   let content = "";
 
@@ -212,7 +202,7 @@ function createPaymentRequiredResponse(
     )} per request</p>
 <p><em>Your client ID: ${clientId}</em></p>`;
 
-    content = markdownToHtml(content);
+    content = markdownToHtml(content, pathname);
   } else {
     content = `# 💳 Payment Required\n\n${message}\n\n`;
 
@@ -228,15 +218,7 @@ function createPaymentRequiredResponse(
     )} per request\n\n*Your client ID: ${clientId}*`;
   }
 
-  return new Response(content, {
-    status: 402,
-    headers: {
-      "Content-Type":
-        ext === "html"
-          ? "text/html; charset=utf-8"
-          : "text/markdown; charset=utf-8",
-    },
-  });
+  return new Response(content, { status: 402, headers });
 }
 
 export default {
@@ -253,7 +235,18 @@ export default {
 
     // Handle CORS preflight
     if (request.method === "OPTIONS") {
-      return addCorsHeaders(new Response(null, { status: 204 }));
+      const response = new Response(null, { status: 204 });
+      response.headers.set("Access-Control-Allow-Origin", "*");
+      response.headers.set(
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS",
+      );
+      response.headers.set(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization",
+      );
+
+      return response;
     }
 
     try {
@@ -268,11 +261,48 @@ export default {
       );
 
       if (stripeResult.response) {
-        return addCorsHeaders(stripeResult.response);
+        return stripeResult.response;
       }
+
+      if (!stripeResult.session) {
+        return new Response("No session could be estabilished", {
+          status: 400,
+        });
+      }
+
+      const { user } = stripeResult.session;
+      const { access_token, verified_user_access_token, ...publicUser } =
+        user || {};
+      const headers = new Headers(stripeResult.session.headers || {});
 
       // Determine response format
       const ext = getResponseFormat(request, pathname);
+
+      headers.set("Access-Control-Allow-Origin", "*");
+      headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      headers.set(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization",
+      );
+
+      headers.append(
+        "Content-Type",
+        ext === "html"
+          ? "text/html; charset=utf-8"
+          : "text/markdown; charset=utf-8",
+      );
+
+      // Handle root path
+      if (pathname === "/") {
+        const content =
+          ext === "html"
+            ? homepageHtml
+            : await env.ASSETS.fetch(url.origin + "/README.md").then((res) =>
+                res.text(),
+              );
+
+        return new Response(content, { headers });
+      }
 
       // Remove extension from pathname if present
       if (pathname.endsWith(".html") || pathname.endsWith(".md")) {
@@ -310,105 +340,70 @@ export default {
                     stripeResult,
                     priceCredit: config.priceCredit,
                     expirationTtl: config.expirationTtl,
+                    headers,
                   }),
                 );
               }
             }
           }
 
-          return addCorsHeaders(
-            new Response(cached.value, {
-              headers: {
-                "Content-Type":
-                  ext === "html"
-                    ? "text/html; charset=utf-8"
-                    : "text/markdown; charset=utf-8",
-                "X-Cache": "HIT",
-              },
-            }),
-          );
-        }
+          headers.append("X-Cache", "HIT");
 
-        // Handle root path
-        if (pathname === "/") {
-          const content =
-            ext === "html"
-              ? homepageHtml
-              : await env.ASSETS.fetch(url.origin + "/README.md").then((res) =>
-                  res.text(),
-                );
-          return addCorsHeaders(
-            new Response(content, {
-              headers: {
-                "Content-Type":
-                  ext === "html"
-                    ? "text/html; charset=utf-8"
-                    : "text/markdown; charset=utf-8",
-              },
-            }),
-          );
+          return new Response(cached.value, { headers });
         }
       }
 
       // Authentication and billing logic
-      let user = null;
-      let clientId = null;
-
-      if (stripeResult.session?.userClient) {
-        user = stripeResult.session.user;
-        clientId = user.client_reference_id || user.access_token;
-      } else {
-        clientId = request.headers.get("CF-Connecting-IP") || "anonymous";
-      }
+      let clientId = stripeResult.session?.user?.client_reference_id;
+      let doName = request.headers.get("CF-Connecting-IP") || "anonymous";
 
       // Check rate limiting for users without balance
-      if (!user || user.balance <= 0) {
-        const rateLimiterId = env.RATE_LIMITER.idFromName(clientId);
+      if (!user || !user.balance || user.balance <= 0) {
+        const rateLimiterId = env.RATE_LIMITER.idFromName(doName);
         const rateLimiter = env.RATE_LIMITER.get(rateLimiterId);
 
         const rateLimitResponse = await rateLimiter.fetch(
           new Request(
-            `https://rate-limiter/check?clientId=${encodeURIComponent(
-              clientId,
-            )}`,
+            `https://rate-limiter/check?clientId=${encodeURIComponent(doName)}`,
           ),
         );
 
         const rateLimitData = await rateLimitResponse.json();
 
         if (!rateLimitData.allowed) {
-          return addCorsHeaders(
-            createPaymentRequiredResponse(
-              `Rate limit exceeded (${config.freeRateLimit} requests per ${
-                config.freeRateLimitResetSeconds / 3600
-              } hour${
-                config.freeRateLimitResetSeconds === 3600 ? "" : "s"
-              }). Please purchase credits to continue.`,
-              env.STRIPE_PAYMENT_LINK,
-              clientId,
-              rateLimitData,
-              ext,
-            ),
+          return createPaymentRequiredResponse(
+            headers,
+            `Rate limit exceeded (${config.freeRateLimit} requests per ${
+              config.freeRateLimitResetSeconds / 3600
+            } hour${
+              config.freeRateLimitResetSeconds === 3600 ? "" : "s"
+            }). Please purchase credits to continue.`,
+            env.STRIPE_PAYMENT_LINK,
+            clientId,
+            rateLimitData,
+            ext,
+            url.pathname,
           );
         }
       }
 
       // Check user balance
       if (user && user.balance < config.priceCredit) {
-        return addCorsHeaders(
-          createPaymentRequiredResponse(
-            `Insufficient balance. Each request costs $${(
-              config.priceCredit / 100
-            ).toFixed(3)}. Please add funds to continue.`,
-            env.STRIPE_PAYMENT_LINK,
-            clientId,
-            null,
-            ext,
-          ),
+        return createPaymentRequiredResponse(
+          headers,
+          `Insufficient balance. Each request costs $${(
+            config.priceCredit / 100
+          ).toFixed(3)}. Please add funds to continue.`,
+          env.STRIPE_PAYMENT_LINK,
+          clientId,
+          null,
+          ext,
+          url.pathname,
         );
       }
 
       return chargedRequest(request, env, ctx, {
+        headers,
         stripeResult,
         priceCredit: config.priceCredit,
         expirationTtl: config.expirationTtl,
@@ -418,7 +413,7 @@ export default {
       const errorResponse = new Response(`Error: ${error.message}`, {
         status: 500,
       });
-      return addCorsHeaders(errorResponse);
+      return errorResponse;
     }
   },
 };
@@ -428,11 +423,11 @@ export default {
  * @param {Request} request
  * @param {Env} env
  * @param {ExecutionContext&{user:StripeUser|null}} ctx
- * @param {{stripeResult:any,priceCredit:number,expirationTtl:number|undefined}} config
+ * @param {{stripeResult:any,priceCredit:number,expirationTtl:number|undefined,headers:Headers}} config
  * @returns
  */
 const chargedRequest = async (request, env, ctx, config) => {
-  const { stripeResult } = config;
+  const { stripeResult, headers } = config;
   const url = new URL(request.url);
   let pathname = url.pathname;
   const ext = getResponseFormat(request, pathname);
@@ -449,7 +444,12 @@ const chargedRequest = async (request, env, ctx, config) => {
   const resultText = await response.text();
 
   // Charge user if they have balance
-  if (ctx.user && stripeResult.session && response.status === 200) {
+  if (
+    stripeResult.session &&
+    stripeResult.session.user &&
+    stripeResult.session.userClient &&
+    response.status === 200
+  ) {
     const { charged } = await stripeResult.session.charge(priceCredit, true);
     console.log(
       `Charged (${String(charged)}) user ${ctx.user.access_token}: $${
@@ -459,10 +459,11 @@ const chargedRequest = async (request, env, ctx, config) => {
   }
 
   // Cache results if successful
-  if (response.status === 200 && env.PATH_CACHE) {
+  const isPrivate = response.headers.get("Cache-Control")?.includes("private");
+  if (response.status === 200 && env.PATH_CACHE && !isPrivate) {
     const cacheKeyMd = createCacheKey(pathname, url.searchParams, "md");
     const cacheKeyHtml = createCacheKey(pathname, url.searchParams, "html");
-    const htmlContent = markdownToHtml(resultText);
+    const htmlContent = markdownToHtml(resultText, url.pathname);
 
     ctx.waitUntil(
       Promise.all([
@@ -478,18 +479,15 @@ const chargedRequest = async (request, env, ctx, config) => {
     );
   }
 
+  headers.append("X-Cache", "MISS");
+
   // Return appropriate format
-  const finalContent = ext === "html" ? markdownToHtml(resultText) : resultText;
+  const finalContent =
+    ext === "html" ? markdownToHtml(resultText, url.pathname) : resultText;
   const finalResponse = new Response(finalContent, {
     status: response.status,
-    headers: {
-      "Content-Type":
-        ext === "html"
-          ? "text/html; charset=utf-8"
-          : "text/markdown; charset=utf-8",
-      "X-Cache": "MISS",
-    },
+    headers,
   });
 
-  return addCorsHeaders(finalResponse);
+  return finalResponse;
 };
