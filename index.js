@@ -142,7 +142,8 @@ function createCacheKey(pathname, searchParams, ext) {
   params.forEach(([key, value]) => sortedParams.append(key, value));
   const query = sortedParams.toString();
   const path = query ? `${pathname}?${query}` : pathname;
-  return `${config.version}:${ext}:${path}`;
+  const trimmedPath = path.length > 500 ? path.slice(0, 500) : path;
+  return `${config.version}:${ext}:${trimmedPath}`;
 }
 
 /**
@@ -332,9 +333,8 @@ export default {
       // Authentication and billing logic
       let clientId = stripeResult.session?.user?.client_reference_id;
       // Check rate limiting for users without balance
-      if (!user || !user.balance || user.balance <= 0) {
-        let doName = request.headers.get("CF-Connecting-IP") || "anonymous";
-        console.log({ doName });
+      let doName = request.headers.get("CF-Connecting-IP") || "anonymous";
+      if ((!user || !user.balance || user.balance <= 0) && doName !== "::1") {
         const rateLimiterId = env.RATE_LIMITER.idFromName(doName);
         const rateLimiter = env.RATE_LIMITER.get(rateLimiterId);
 
@@ -414,6 +414,11 @@ const chargedRequest = async (request, env, ctx, config) => {
   ctx.user = stripeResult.session.user;
 
   const response = await handler.fetch(request, env, ctx);
+  if (response.status >= 300 && response.status < 400) {
+    // return redirects immediatelywr
+    return response;
+  }
+
   const priceCreditHeader = response.headers.get("X-Price");
   const priceCredit =
     priceCreditHeader && !isNaN(Number(priceCreditHeader))

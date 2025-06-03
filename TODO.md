@@ -12,7 +12,3 @@
 - Make it clearer how to use user-agent-402, which endpoints you have access to, typings, etc.
 - Serve that as lmpify to quickly make an app with this from a template
 - launch: user-agent-402 (new name?)
-
-# BACKLOG
-
-We want to be able to charge any user by ID in non-fetch-requests as well e.g. for queued jobs and cron jobs. Ensure we overwrite all handlers to pass an additional function `ctx.charge(userId,amountCents,allowNegativeBalance)`

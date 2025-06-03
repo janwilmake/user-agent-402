@@ -1,3 +1,9 @@
+# Provide `ctx.charge` to all queues/schedules/do
+
+We want to be able to charge any user by ID in non-fetch-requests as well e.g. for queued jobs and cron jobs. Ensure we overwrite all handlers to pass an additional function `ctx.charge(userId,amountCents,allowNegativeBalance)`
+
+Especially serving it to a DO may be tricky
+
 # Abstract Away Secret Management for Stripe Integration
 
 The current solution allows you to fully control all secrets and configuration in wrangler and do your own deployment. However, what if stripe was a managed resource that got created and configured? We can even go further and remove the need for `wrangler.toml` altogether if we also provision a queue and schedule based on exported config. This does create some complications though, so is it possible to just manage stripe via a cli (as in-between step)?
