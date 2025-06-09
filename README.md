@@ -81,3 +81,7 @@ export default {
   },
 };
 ```
+
+# Update june 9, 2025
+
+After trying this for GoogLLM and especially after someone else tried it, I found this is actually a very nice thing and, although it's a nice thing to strive for, it can't always be done like this. This is therefore abandoned
